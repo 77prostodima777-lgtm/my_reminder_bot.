@@ -9,40 +9,42 @@ from telegram.ext import (
     ContextTypes,
 )
 
-# ======================
+# =========================
 # НАЛАШТУВАННЯ
-# ======================
+# =========================
 
 BOT_TOKEN = os.getenv("BOT_TOKEN")
 
-if not BOT_TOKEN:
-    raise ValueError("❌ BOT_TOKEN не знайдено в змінних середовища")
+if BOT_TOKEN is None:
+    raise RuntimeError("BOT_TOKEN не заданий")
 
 logging.basicConfig(
-    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
     level=logging.INFO,
+    format="%(asctime)s - %(levelname)s - %(message)s",
 )
 
 logger = logging.getLogger(__name__)
 
-# Тимчасове сховище (пізніше замінимо на БД)
 REMINDERS = {}
 
 
-# ======================
+# =========================
 # ДОПОМІЖНІ ФУНКЦІЇ
-# ======================
+# =========================
 
-def parse_time(time_str: str) -> datetime | None:
-    """
-    Формат: HH:MM
-    """
+def parse_time(time_str):
     try:
-        now = datetime.now()
         hour, minute = map(int, time_str.split(":"))
-        reminder_time = now.replace(hour=hour, minute=minute, second=0)
+        now = datetime.now()
 
-        if reminder_time < now:
+        reminder_time = now.replace(
+            hour=hour,
+            minute=minute,
+            second=0,
+            microsecond=0
+        )
+
+        if reminder_time <= now:
             reminder_time += timedelta(days=1)
 
         return reminder_time
@@ -51,117 +53,106 @@ def parse_time(time_str: str) -> datetime | None:
 
 
 async def reminder_callback(context: ContextTypes.DEFAULT_TYPE):
-    job = context.job
-    chat_id = job.chat_id
-    text = job.data
-
     await context.bot.send_message(
-        chat_id=chat_id,
-        text=f"⏰ НАГАДУВАННЯ:\n{text}"
+        chat_id=context.job.chat_id,
+        text=f"⏰ НАГАДУВАННЯ:\n{context.job.data}"
     )
 
 
-# ======================
+# =========================
 # КОМАНДИ
-# ======================
+# =========================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await update.message.reply_text(
         "👋 Привіт!\n\n"
         "Я бот-нагадувач.\n\n"
-        "📌 Команди:\n"
-        "/add HH:MM текст — додати нагадування\n"
-        "/list — список нагадувань\n"
-        "/delete ID — видалити нагадування\n"
-        "/help — допомога"
-    )
-
-
-async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text(
-        "📖 ДОВІДКА\n\n"
-        "➕ Додати нагадування:\n"
-        "/add 18:30 Купити воду\n\n"
-        "📋 Переглянути список:\n"
-        "/list\n\n"
-        "❌ Видалити:\n"
-        "/delete 1"
+        "Команди:\n"
+        "/add 18:30 Текст — додати\n"
+        "/list — список\n"
+        "/delete 1 — видалити"
     )
 
 
 async def add_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if len(context.args) < 2:
-        await update.message.reply_text(
-            "❌ Неправильний формат\n"
-            "Приклад:\n/add 18:30 Купити воду"
-        )
+        await update.message.reply_text("❌ Формат: /add 18:30 текст")
         return
 
     time_str = context.args[0]
     text = " ".join(context.args[1:])
 
     reminder_time = parse_time(time_str)
-
-    if not reminder_time:
-        await update.message.reply_text("❌ Час має бути у форматі HH:MM")
+    if reminder_time is None:
+        await update.message.reply_text("❌ Час у форматі HH:MM")
         return
 
     chat_id = update.effective_chat.id
+    delay = (reminder_time - datetime.now()).total_seconds()
 
     job = context.job_queue.run_once(
         reminder_callback,
-        when=(reminder_time - datetime.now()).total_seconds(),
+        delay,
         chat_id=chat_id,
-        data=text,
+        data=text
     )
 
     REMINDERS.setdefault(chat_id, []).append({
-        "id": job.id,
-        "time": reminder_time.strftime("%H:%M"),
-        "text": text,
+        "job_id": job.id,
+        "time": time_str,
+        "text": text
     })
 
     await update.message.reply_text(
-        f"✅ Нагадування додано!\n"
-        f"🕒 {time_str}\n"
-        f"📌 {text}"
+        f"✅ Додано:\n⏰ {time_str}\n📌 {text}"
     )
 
 
 async def list_reminders(update: Update, context: ContextTypes.DEFAULT_TYPE):
     chat_id = update.effective_chat.id
-    reminders = REMINDERS.get(chat_id, [])
+    items = REMINDERS.get(chat_id, [])
 
-    if not reminders:
-        await update.message.reply_text("📭 У тебе немає нагадувань")
+    if not items:
+        await update.message.reply_text("📭 Нагадувань немає")
         return
 
-    message = "📋 ТВОЇ НАГАДУВАННЯ:\n\n"
-    for i, r in enumerate(reminders, start=1):
-        message += f"{i}. ⏰ {r['time']} — {r['text']}\n"
+    msg = "📋 Нагадування:\n"
+    for i, r in enumerate(items, 1):
+        msg += f"{i}. {r['time']} — {r['text']}\n"
 
-    await update.message.reply_text(message)
+    await update.message.reply_text(msg)
 
 
 async def delete_reminder(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not context.args:
-        await update.message.reply_text("❌ Вкажи ID\n/delete 1")
+        await update.message.reply_text("❌ /delete 1")
         return
 
     chat_id = update.effective_chat.id
-    reminders = REMINDERS.get(chat_id, [])
+    index = int(context.args[0]) - 1
 
     try:
-        index = int(context.args[0]) - 1
-        reminder = reminders.pop(index)
-        await update.message.reply_text("🗑 Нагадування видалено")
+        REMINDERS[chat_id].pop(index)
+        await update.message.reply_text("🗑 Видалено")
     except Exception:
         await update.message.reply_text("❌ Невірний ID")
 
 
-# ======================
-# ЗАПУСК БОТА
-# ======================
+# =========================
+# ЗАПУСК
+# =========================
 
 def main():
-    app = ApplicationBuilder().
+    app = ApplicationBuilder().token(BOT_TOKEN).build()
+
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("add", add_reminder))
+    app.add_handler(CommandHandler("list", list_reminders))
+    app.add_handler(CommandHandler("delete", delete_reminder))
+
+    logger.info("🤖 Бот запущений")
+    app.run_polling()
+
+
+if name == "__main__":
+    main()
